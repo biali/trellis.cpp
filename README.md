@@ -115,6 +115,9 @@ The most useful ones:
 | `--bg-removal threshold\|birefnet` | default **auto**: pre-matted images keep their alpha, otherwise the BiRefNet matte (~13s on GPU). The plain white-bg keyer cuts specular highlights out of the alpha — the flow then generates holes there — so it is opt-in only |
 | `--no-texture` | geometry only |
 | `--faces N` | QEM face target before UV bake (default 300K @1024 / 150K @512; min 1000) |
+| `--steps N` | flow sampler steps for every stage (default 12). Wall clock scales about linearly with it — the three flow stages are the bulk of a run |
+| `--steps-ss N` / `--steps-shape N` / `--steps-tex N` | steps for one stage only; overrides `--steps` |
+| `--gi0 F` / `--gi1 F` | guidance interval, default `0.6 .. 1.0`. A step runs the second, unconditional forward only while the rescaled timestep is inside it — which is why a 12-step guided stage logs 22 forwards, not 24. Narrowing it drops forwards without dropping steps. Applies to the guided stages (sparse-structure, shape SLAT); the texture flow samples unguided and ignores it |
 | `--decim GRID` | legacy cluster-grid decimation (default: quadric simplify to 300K faces @1024 / 150K @512; `0` = keep the full-res mesh) |
 | `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |
 | `--box-uv` | voxel-native 6-way box projection instead of the default xatlas unwrap (O(faces), faster, looser packing) |
@@ -145,7 +148,11 @@ GET  /health     -> "ok"
 POST /generate      multipart/form-data with an "image" file part; optional text
                     fields "seed", "resolution" (512/1024/1536), "bg_removal"
                     (threshold|birefnet), "uv" (xatlas|box), "band", "webp",
-                    "face_budget" (QEM face target before UV bake; omit = default).
+                    "face_budget" (QEM face target before UV bake; omit = default),
+                    "steps" / "steps_ss" / "steps_shape" / "steps_tex" (flow sampler
+                    steps, omit = 12) and "gi0" / "gi1" (guidance interval on the
+                    guided flows, omit = 0.6 .. 1.0). A non-positive step count or a
+                    bound outside [0,1] is a 400.
                     Returns model/gltf-binary.
 ```
 

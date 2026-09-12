@@ -6,8 +6,10 @@
 //                      (threshold|birefnet), "uv" (xatlas = default, unique
 //                      chart space; box = faster projection), "band" (narrow-band
 //                      DC remesh band width — see --band), "face_budget" (QEM face
-//                      target before UV bake; omit = cascade default). Returns
-//                      model/gltf-binary.
+//                      target before UV bake; omit = cascade default), "steps" /
+//                      "steps_ss" / "steps_shape" / "steps_tex" (flow sampler steps;
+//                      omit = 12) and "gi0" / "gi1" (guidance interval on the guided
+//                      flows; omit = 0.6 .. 1.0). Returns model/gltf-binary.
 //
 // Launch-time defaults come from CLI flags (see trellis::parse_args);
 // each request copies those defaults and applies its own overrides. The model
@@ -101,6 +103,39 @@ int main(int argc, char** argv) {
         if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
         if (req.has_file("band")) p.band = atoi(req.get_file_value("band").content.c_str());
         if (req.has_file("face_budget")) p.faces = atoi(req.get_file_value("face_budget").content.c_str());
+        // Sampler overrides. An out-of-range value is a 400, not a clamp: a request
+        // that asked for 0 steps wanted something this server cannot do, and quietly
+        // substituting 12 would bill it as honoured.
+        auto steps_field = [&](const char* name, int& dst) {
+            if (!req.has_file(name)) return true;
+            const int n = atoi(req.get_file_value(name).content.c_str());
+            if (n < 1) return false;
+            dst = n;
+            return true;
+        };
+        auto gi_field = [&](const char* name, float& dst) {
+            if (!req.has_file(name)) return true;
+            const float f = (float)atof(req.get_file_value(name).content.c_str());
+            if (!(f >= 0.0f && f <= 1.0f)) return false;
+            dst = f;
+            return true;
+        };
+        if (!steps_field("steps", p.steps) || !steps_field("steps_ss", p.steps_ss) ||
+            !steps_field("steps_shape", p.steps_shape) || !steps_field("steps_tex", p.steps_tex)) {
+            res.status = 400;
+            res.set_content("{\"error\":\"steps fields must be positive integers\"}", "application/json");
+            return;
+        }
+        if (!gi_field("gi0", p.gi0) || !gi_field("gi1", p.gi1)) {
+            res.status = 400;
+            res.set_content("{\"error\":\"gi0/gi1 must be in [0, 1]\"}", "application/json");
+            return;
+        }
+        if (p.gi0 >= 0.0f && p.gi1 >= 0.0f && p.gi0 > p.gi1) {
+            res.status = 400;
+            res.set_content("{\"error\":\"gi0 must not exceed gi1\"}", "application/json");
+            return;
+        }
         if (req.has_file("webp")) {
             const std::string& w = req.get_file_value("webp").content;
             p.webp = (w == "off" || w == "0" || w == "false") ? 0
@@ -120,10 +155,22 @@ int main(int argc, char** argv) {
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %s\n",
+            // Steps and the guidance interval are reported per request because they
+            // are the two knobs that move wall clock most: a log line without them
+            // cannot explain why two runs of the same image took different times.
+            auto steps_str = [](int v) { return v > 0 ? std::to_string(v) : std::string("default"); };
+            const std::string s_ss  = steps_str(p.steps_ss_or_default());
+            const std::string s_sh  = steps_str(p.steps_shape_or_default());
+            const std::string s_tex = steps_str(p.steps_tex_or_default());
+            char gi[32] = "default";
+            if (p.gi0 >= 0.0f || p.gi1 >= 0.0f)
+                snprintf(gi, sizeof gi, "%.2f..%.2f", p.gi0 < 0.0f ? 0.6f : p.gi0, p.gi1 < 0.0f ? 1.0f : p.gi1);
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %s, "
+                            "steps ss=%s/shape=%s/tex=%s, guidance interval %s\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
                     p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box",
-                    p.faces > 0 ? std::to_string(p.faces).c_str() : "default");
+                    p.faces > 0 ? std::to_string(p.faces).c_str() : "default",
+                    s_ss.c_str(), s_sh.c_str(), s_tex.c_str(), gi);
             try {
                 int rc = trellis_run(p);
                 if (rc == 0) glb = read_file_bytes(p.output);

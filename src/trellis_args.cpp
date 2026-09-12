@@ -41,6 +41,17 @@ void print_usage(const char* argv0, bool server) {
         "                          res-1024 outer-skin speckle; N forces that width)\n"
         "      --faces N           QEM face target before UV bake (default: 300K @1024 /\n"
         "                          150K @512; min 1000)\n"
+        "      --steps N           flow sampler steps for every stage (default 12).\n"
+        "                          Wall clock scales about linearly with this.\n"
+        "      --steps-ss N        steps for the sparse-structure flow only\n"
+        "      --steps-shape N     steps for the shape-SLAT flow only\n"
+        "      --steps-tex N       steps for the texture-SLAT flow only\n"
+        "      --gi0 F  --gi1 F    guidance interval (default 0.6 .. 1.0). A step runs the\n"
+        "                          second, unconditional forward only while the rescaled\n"
+        "                          timestep is inside [gi0, gi1], so narrowing this drops\n"
+        "                          forwards without dropping steps. Guided stages only\n"
+        "                          (sparse-structure, shape SLAT); the texture flow is\n"
+        "                          unguided and ignores it.\n"
         "      --decim GRID        legacy cluster-grid decimation (default: quadric\n"
         "                          simplify to 300K faces @1024 / 150K @512; 0 = none)\n"
         "      --atlas PX          UV atlas size (default 2048 @1024 / 1024 @512)\n"
@@ -58,6 +69,23 @@ void print_usage(const char* argv0, bool server) {
         "      --voxply            also dump the voxel point cloud as .ply\n"
         "      --dump-slat         dump the structured latent to disk\n"
         "  -h, --help              show this help\n");
+}
+
+// A zero or negative step count would silently return the initial noise, and a
+// guidance bound outside [0,1] silently disables (or force-enables) guidance for
+// the whole trajectory. Both are typos worth failing on, not absorbing.
+static bool parse_steps(const char* flag, const char* v, int& out) {
+    const int n = atoi(v);
+    if (n < 1) { fprintf(stderr, "[trellis] %s needs a positive step count (got '%s')\n", flag, v); return false; }
+    out = n;
+    return true;
+}
+
+static bool parse_gi(const char* flag, const char* v, float& out) {
+    const float f = (float)atof(v);
+    if (!(f >= 0.0f && f <= 1.0f)) { fprintf(stderr, "[trellis] %s must be in [0, 1] (got '%s')\n", flag, v); return false; }
+    out = f;
+    return true;
 }
 
 bool parse_args(int argc, char** argv, TrellisParams& p) {
@@ -90,6 +118,12 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--box-uv")               { p.xatlas = false; }
         else if (a == "--band")                 { const char* v = need(a.c_str()); if (!v) return false; p.band = atoi(v); }
         else if (a == "--faces")                { const char* v = need(a.c_str()); if (!v) return false; p.faces = atoi(v); }
+        else if (a == "--steps")                { const char* v = need(a.c_str()); if (!v || !parse_steps(a.c_str(), v, p.steps)) return false; }
+        else if (a == "--steps-ss")             { const char* v = need(a.c_str()); if (!v || !parse_steps(a.c_str(), v, p.steps_ss)) return false; }
+        else if (a == "--steps-shape")          { const char* v = need(a.c_str()); if (!v || !parse_steps(a.c_str(), v, p.steps_shape)) return false; }
+        else if (a == "--steps-tex")            { const char* v = need(a.c_str()); if (!v || !parse_steps(a.c_str(), v, p.steps_tex)) return false; }
+        else if (a == "--gi0")                  { const char* v = need(a.c_str()); if (!v || !parse_gi(a.c_str(), v, p.gi0)) return false; }
+        else if (a == "--gi1")                  { const char* v = need(a.c_str()); if (!v || !parse_gi(a.c_str(), v, p.gi1)) return false; }
         else if (a == "--decim")                { const char* v = need(a.c_str()); if (!v) return false; p.decim = atoi(v); }
         else if (a == "--atlas" || a == "--tex"){ const char* v = need(a.c_str()); if (!v) return false; p.tex = atoi(v); }
         else if (a == "--tex-res")              { const char* v = need(a.c_str()); if (!v) return false; p.tex_res = atoi(v); }
@@ -111,6 +145,11 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (positional == 0)               { p.image  = a; positional = 1; }
         else if (positional == 1)               { p.output = a; positional = 2; }
         else                                    { fprintf(stderr, "[trellis] unexpected argument: %s\n", a.c_str()); return false; }
+    }
+    // Checked after the loop so the two bounds can arrive in either order.
+    if (p.gi0 >= 0.0f && p.gi1 >= 0.0f && p.gi0 > p.gi1) {
+        fprintf(stderr, "[trellis] --gi0 (%.3f) must not exceed --gi1 (%.3f)\n", p.gi0, p.gi1);
+        return false;
     }
     return true;
 }

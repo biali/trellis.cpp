@@ -43,6 +43,22 @@ struct TrellisParams {
                                 //   speckle (issue #22). >0 forces that width (e.g. 1 for
                                 //   the thin-wall reference look, 2 for a thicker shell).
     int  faces    = -1;         // QEM face target before UV bake (-1 => 150K@512 / 300K@cascade)
+
+    // Sampler overrides. -1 keeps each stage's tuned default (12 steps, and the
+    // guidance interval each stage was tuned with) so an unset run is bit-identical
+    // to one built before these existed.
+    int  steps       = -1;      // every flow stage      (--steps)
+    int  steps_ss    = -1;      // sparse-structure flow (--steps-ss),    overrides --steps
+    int  steps_shape = -1;      // shape-SLAT flow       (--steps-shape), overrides --steps
+    int  steps_tex   = -1;      // texture-SLAT flow     (--steps-tex),   overrides --steps
+    // Guidance interval on the two GUIDED flows (sparse-structure, shape SLAT).
+    // A step only pays for the second, unconditional forward while the (rescaled)
+    // timestep is inside [gi0, gi1] — which is why a 12-step stage reports 22 and
+    // not 24 forwards. Narrowing the interval buys wall clock without dropping
+    // steps. The texture flow runs at guidance strength 1.0, i.e. unguided, so the
+    // interval is inert there and these do not touch it.
+    float gi0 = -1.0f;          // low end  (--gi0), stage default 0.6
+    float gi1 = -1.0f;          // high end (--gi1), stage default 1.0
     int  decim    = -1;         // decimation cluster grid   (-1 => per-cascade default)
     int  tex      = -1;         // UV atlas size in px        (-1 => per-cascade default)
     int  tex_res  = -1;         // texture PBR resolution: -1 => auto (drop dense res-1024 tex to
@@ -60,6 +76,13 @@ struct TrellisParams {
     bool bg_only = false;       // background removal only: write the cutout and skip the rest
 
     bool help = false;          // --help requested
+
+    // Per-stage step count: the stage flag wins, then --steps, then -1 = the
+    // stage's own default (the caller substitutes it; the parser has no business
+    // knowing that every stage happens to use 12 today).
+    int steps_ss_or_default() const    { return steps_ss    > 0 ? steps_ss    : steps; }
+    int steps_shape_or_default() const { return steps_shape > 0 ? steps_shape : steps; }
+    int steps_tex_or_default() const   { return steps_tex   > 0 ? steps_tex   : steps; }
 
     // 512 -> light single-res path; 1024/1536 -> cascade with that HR target.
     void set_res(int res) {

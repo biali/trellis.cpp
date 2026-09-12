@@ -33,6 +33,20 @@
 using std::vector;
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
+// Apply the CLI/request sampler overrides onto a stage's tuned SamplerParams.
+// `steps_override` is that stage's resolved count (<=0 = leave the stage default
+// the caller already set). `guided` is false for the texture flow, which samples
+// at guidance strength 1.0: the interval never selects a second forward there, so
+// honouring --gi0/--gi1 on it would report a change that cannot happen.
+static void apply_sampler_overrides(trellis::SamplerParams& sp,
+                                    const trellis::TrellisParams& cfg,
+                                    int steps_override, bool guided) {
+    if (steps_override > 0) sp.steps = steps_override;
+    if (!guided) return;
+    if (cfg.gi0 >= 0.0f) sp.gi0 = cfg.gi0;
+    if (cfg.gi1 >= 0.0f) sp.gi1 = cfg.gi1;
+}
+
 // Debug dumps (TRELLIS_DUMP_*) take an operator-supplied name, but the open
 // path is always rebuilt under a fixed dump directory + basename so env values
 // cannot traverse outside that directory (CWE-22).
@@ -174,6 +188,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::DitRunner* run = trellis::make_dense_runner(m, p, 16, Lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const float* c){ return run->forward(x, ts, c); };
         trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=cfg.gss; sp.guidance_rescale=0.7f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=5.0f;
+        apply_sampler_overrides(sp, cfg, cfg.steps_ss_or_default(), /*guided=*/true);
         vector<float> z = trellis::sample_flow(fwd, noise(8*4096), cond.data(), neg.data(), sp);  // [8,4096] ne0=8
         delete run; m.free();
         // transpose [8,L] -> torch [8,16,16,16] memory (c*4096 + sp)
@@ -198,6 +213,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::DitRunner* run = trellis::make_sparse_runner(m, p, cds, lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const float* c){ return run->forward(x, ts, c); };
         trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=cfg.gsh; sp.guidance_rescale=0.5f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=3.0f;
+        apply_sampler_overrides(sp, cfg, cfg.steps_shape_or_default(), /*guided=*/true);
         vector<float> sn = trellis::sample_flow(fwd, noise((size_t)32*n), cnd, ncnd, sp);   // [32,n]
         delete run; m.free();
         return sn;
@@ -353,6 +369,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                 return run->forward(x64, ts, c);
             };
             trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=1.0f; sp.guidance_rescale=0.0f; sp.gi0=0.6f; sp.gi1=0.9f; sp.rescale_t=3.0f;
+            apply_sampler_overrides(sp, cfg, cfg.steps_tex_or_default(), /*guided=*/false);
             texlat = trellis::sample_flow(fwd, noise((size_t)32*tN), tcond, tneg, sp);  // [32,tN]
             delete run; m.free();
             for (int n = 0; n < tN; ++n) for (int c = 0; c < 32; ++c) texlat[(size_t)c + 32*n] = texlat[(size_t)c + 32*n]*TEX_STD[c] + TEX_MEAN[c];
