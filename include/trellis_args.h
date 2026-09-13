@@ -10,6 +10,7 @@ namespace trellis {
 extern bool g_sparse_cast_f32;  // defined in sparse.cpp        (TRELLIS_F32)
 extern bool g_no_fa;            // defined in dit.cpp           (TRELLIS_NOFA)
 extern bool g_require_gpu;      // defined in trellis_model.cpp (TRELLIS_REQUIRE_GPU)
+extern int  g_cpu_threads;      // defined in trellis_model.cpp (TRELLIS_THREADS)
 
 // Every knob for one TRELLIS.2 image->3D run. Resolved as default -> environment
 // (the historical TRELLIS_* / GSS / GSH names) -> CLI flag, with the CLI winning.
@@ -52,6 +53,7 @@ struct TrellisParams {
     bool f32      = false;      // f32 sparse-conv compute
     bool no_fa    = false;      // disable FlashAttention (manual softmax)
     bool require_gpu = false;   // refuse CPU fallback if no GPU is usable
+    int  threads  = 0;          // CPU backend thread count; 0 = all cores
     float gss = 7.5f;           // sparse-structure guidance strength
     float gsh = 7.5f;           // shape-SLAT guidance strength
 
@@ -67,6 +69,12 @@ struct TrellisParams {
     bool voxply = false;        // dump out/myvox.ply              (debug)
     bool dump_slat = false;     // dump /tmp/hr_slat.bin           (debug)
     bool dump_bg = false;       // also write the bg-removal cutout as <out>_cutout.png
+    std::string dump_post;      // write the raw decoded mesh + sparse PBR volume to this
+                                // path and exit (skips remesh/decimate/UV/bake/GLB) --
+                                // machine-readable output for external post-processing
+                                // pipelines (binary: i32 V,F,Mv,res; f32 verts[V*3];
+                                // i32 faces[F*3]; i32 coords[Mv*3]; f32 pbr6[Mv*6];
+                                // same layout as the TRELLIS_DUMP_POST debug env)
     bool bg_only = false;       // background removal only: write the cutout and skip the rest
 
     bool help = false;          // --help requested

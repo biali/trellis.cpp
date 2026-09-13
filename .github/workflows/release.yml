@@ -13,11 +13,13 @@ on:
 permissions:
   contents: write
 
-# Asset names must match Lemonade's media_release_asset():
+# Standard asset names must match Lemonade's media_release_asset():
 #   trellis-<backend>-<os>-x64.<tar.gz|zip>
+# cuda12 is an additional legacy artifact selected by the standalone installer
+# for Pascal/Volta devices; it does not replace Lemonade's current-CUDA asset.
 jobs:
   build:
-    name: ${{ matrix.os }} · ${{ matrix.backend }}
+    name: ${{ matrix.os }} · ${{ matrix.release_backend || matrix.backend }}
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental == true }}
     strategy:
@@ -25,10 +27,12 @@ jobs:
       matrix:
         include:
           - { os: linux,   backend: vulkan, runner: ubuntu-22.04 }
-          - { os: linux,   backend: cuda,   runner: ubuntu-22.04 }
+          - { os: linux,   backend: cuda,   release_backend: cuda,   cuda_version: "13.1.0", cuda_archs: "75;80;86;89;90;120", runner: ubuntu-22.04 }
+          - { os: linux,   backend: cuda,   release_backend: cuda12, cuda_version: "12.9.1", cuda_archs: "60;61;70",          runner: ubuntu-22.04 }
           - { os: linux,   backend: rocm,   runner: ubuntu-22.04,  experimental: true }
           - { os: windows, backend: vulkan, runner: windows-2022 }
-          - { os: windows, backend: cuda,   runner: windows-2022, experimental: true }
+          - { os: windows, backend: cuda,   release_backend: cuda,   cuda_version: "13.1.0", cuda_archs: "75;80;86;89;90;120", runner: windows-2022, experimental: true }
+          - { os: windows, backend: cuda,   release_backend: cuda12, cuda_version: "12.9.1", cuda_archs: "60;61;70",          runner: windows-2022, experimental: true }
           - { os: windows, backend: rocm,   runner: windows-2022, experimental: true }
 
     steps:
@@ -46,7 +50,31 @@ jobs:
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: ${{ matrix.os }}-${{ matrix.backend }}
+          key: ${{ matrix.os }}-${{ matrix.release_backend || matrix.backend }}
+
+      # GitHub's Ubuntu runners prefer azure.archive.ubuntu.com through
+      # /etc/apt/apt-mirrors.txt. A dead Azure mirror can otherwise leave apt
+      # (including the CUDA toolkit action's internal apt-get update) hung until
+      # the six-hour job limit. Use Ubuntu's HTTPS archive and bound retries.
+      - name: Harden Ubuntu package downloads
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu' |
+              sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          for sources in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$sources" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$sources"
+            fi
+          done
+          sudo tee /etc/apt/apt.conf.d/99-trellis-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          EOF
 
       # Linux: the minimal SDK is enough (runner provides spirv-headers).
       - name: Vulkan SDK (Linux)
@@ -78,7 +106,9 @@ jobs:
       - name: CUDA toolkit
         if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.30
+        timeout-minutes: 60
         with:
+          cuda: ${{ matrix.cuda_version }}
           method: network
 
       # Best-effort ROCm 7.12 (TheRock), matching the version Lemonade pins.
@@ -141,7 +171,7 @@ jobs:
             vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
             # ggml rewrites 12x -> 12xa (arch-specific); Blackwell ships SASS-only
             # (120a can't be virtual), so no PTX fallback entry here.
-            cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120" ;;
+            cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_archs }}" ;;
             # Popular consumer ISAs: RDNA2 dGPUs, RDNA3 dGPUs + 780M, RDNA3.5 iGPUs, RDNA4.
             rocm)   FLAGS="-DGGML_HIP=ON -DGGML_HIP_GRAPHS=OFF -DGPU_TARGETS=gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1200;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
           esac
@@ -184,7 +214,7 @@ jobs:
               done
               ls -la dist/*.dll
             fi
-            ASSET="trellis-${{ matrix.backend }}-windows-x64.zip"
+            ASSET="trellis-${{ matrix.release_backend || matrix.backend }}-windows-x64.zip"
             (cd dist && 7z a -y "../$ASSET" ./* >/dev/null)
           else
             cp build/trellis-server dist/
@@ -203,7 +233,7 @@ jobs:
             fi
             sudo apt-get install -y -qq patchelf
             for f in $(find dist -type f); do patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true; done
-            ASSET="trellis-${{ matrix.backend }}-linux-x64.tar.gz"
+            ASSET="trellis-${{ matrix.release_backend || matrix.backend }}-linux-x64.tar.gz"
             tar -C dist -czf "$ASSET" .
           fi
           echo "ASSET=$ASSET" >> "$GITHUB_ENV"
@@ -255,9 +285,32 @@ jobs:
         with:
           workspaces: app/src-tauri
 
+      # Keep the runner's Azure Ubuntu mirror from hanging apt-get update until
+      # GitHub's six-hour job timeout. See the equivalent runtime-build step.
+      - name: Harden Ubuntu package downloads
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu' |
+              sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          for sources in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$sources" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$sources"
+            fi
+          done
+          sudo tee /etc/apt/apt.conf.d/99-trellis-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          EOF
+
       # Tauri v2 Linux system dependencies (webkit2gtk 4.1 stack).
       - name: Linux system deps
         if: matrix.os == 'linux'
+        timeout-minutes: 30
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
