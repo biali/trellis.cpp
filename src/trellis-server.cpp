@@ -6,8 +6,11 @@
 //                      (threshold|birefnet), "uv" (xatlas = default, unique
 //                      chart space; box = faster projection), "band" (narrow-band
 //                      DC remesh band width — see --band), "face_budget" (QEM face
-//                      target before UV bake; omit = cascade default). Returns
-//                      model/gltf-binary.
+//                      target before UV bake; omit = cascade default), "steps" /
+//                      "gi0" / "gi1" (flow sampler steps and guidance interval —
+//                      see --steps/--gi0/--gi1). A malformed or out-of-range
+//                      sampling field is rejected with 400 before any GPU work.
+//                      Returns model/gltf-binary.
 //
 // Launch-time defaults come from CLI flags (see trellis::parse_args);
 // each request copies those defaults and applies its own overrides. The model
@@ -48,6 +51,26 @@ std::string temp_stem() {
     if (ec) dir = ".";
     auto n = counter.fetch_add(1);
     return (dir / ("trellis-req-" + std::to_string(n))).string();
+}
+
+// Minimal JSON string-body escaping for the error replies (control characters
+// other than the named ones are dropped rather than emitted raw).
+std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((unsigned char)c < 0x20) break;
+                out += c;
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -106,6 +129,31 @@ int main(int argc, char** argv) {
             p.webp = (w == "off" || w == "0" || w == "false") ? 0
                    : (w == "on"  || w == "1" || w == "true")  ? 1 : -1;
         }
+        // Sampling overrides are strictly parsed and range-checked here: a bad
+        // body must cost a 400, not a staged image and a GPU run.
+        auto bad_request = [&res](const std::string& why) {
+            res.status = 400;
+            res.set_content("{\"error\":\"" + json_escape(why) + "\"}", "application/json");
+        };
+        if (req.has_file("steps") &&
+            !trellis::parse_int_strict(req.get_file_value("steps").content.c_str(), p.steps)) {
+            bad_request("'steps' must be an integer");
+            return;
+        }
+        if (req.has_file("gi0") &&
+            !trellis::parse_float_strict(req.get_file_value("gi0").content.c_str(), p.gi0)) {
+            bad_request("'gi0' must be a number");
+            return;
+        }
+        if (req.has_file("gi1") &&
+            !trellis::parse_float_strict(req.get_file_value("gi1").content.c_str(), p.gi1)) {
+            bad_request("'gi1' must be a number");
+            return;
+        }
+        {
+            std::string err;
+            if (!trellis::validate_sampling(p, err)) { bad_request(err); return; }
+        }
 
         const std::string stem = temp_stem();
         p.image  = stem + ".png";
@@ -120,10 +168,13 @@ int main(int argc, char** argv) {
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %s\n",
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %s, steps %s, gi [%s,%s]\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
                     p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box",
-                    p.faces > 0 ? std::to_string(p.faces).c_str() : "default");
+                    p.faces > 0 ? std::to_string(p.faces).c_str() : "default",
+                    p.steps > 0 ? std::to_string(p.steps).c_str() : "default",
+                    p.gi0 >= 0.0f ? std::to_string(p.gi0).c_str() : "default",
+                    p.gi1 >= 0.0f ? std::to_string(p.gi1).c_str() : "default");
             try {
                 int rc = trellis_run(p);
                 if (rc == 0) glb = read_file_bytes(p.output);
@@ -140,20 +191,7 @@ int main(int argc, char** argv) {
 
         if (glb.empty()) {
             res.status = 500;
-            std::string escaped;
-            for (char c : error_message) {
-                switch (c) {
-                    case '"':  escaped += "\\\""; break;
-                    case '\\': escaped += "\\\\"; break;
-                    case '\n': escaped += "\\n";  break;
-                    case '\r': escaped += "\\r";  break;
-                    case '\t': escaped += "\\t";  break;
-                    default:
-                        if ((unsigned char)c < 0x20) break;
-                        escaped += c;
-                }
-            }
-            res.set_content("{\"error\":\"" + escaped + "\"}", "application/json");
+            res.set_content("{\"error\":\"" + json_escape(error_message) + "\"}", "application/json");
             return;
         }
         res.set_content(glb.data(), glb.size(), "model/gltf-binary");
