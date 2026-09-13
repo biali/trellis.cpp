@@ -1,5 +1,9 @@
 #include "trellis_args.h"
 
+#include <cctype>
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,10 +58,76 @@ void print_usage(const char* argv0, bool server) {
         "      --no-fa             disable FlashAttention\n"
         "      --require-gpu       refuse CPU fallback\n"
         "      --gss F  --gsh F    guidance strengths\n"
+        "      --steps N           flow sampler steps, all stages   (default 12)\n"
+        "      --gi0 F  --gi1 F    guidance interval [gi0,gi1], all stages (default\n"
+        "                          0.6 / 1.0, texture 0.9 — a step whose rescaled\n"
+        "                          timestep falls outside runs one forward instead of\n"
+        "                          the CFG pair. --steps 8 --gi0 0.75 is ~1.36x)\n"
         "      --host H  --port P  trellis-server bind address\n"
         "      --voxply            also dump the voxel point cloud as .ply\n"
         "      --dump-slat         dump the structured latent to disk\n"
         "  -h, --help              show this help\n");
+}
+
+namespace {
+
+const char* skip_ws(const char* s) {
+    while (*s && std::isspace((unsigned char)*s)) ++s;
+    return s;
+}
+
+bool trailing_is_ws(const char* end) {
+    return *skip_ws(end) == '\0';
+}
+
+}  // namespace
+
+bool parse_int_strict(const char* s, int& out) {
+    if (!s) return false;
+    const char* b = skip_ws(s);
+    if (!*b) return false;
+    errno = 0;
+    char* end = nullptr;
+    const long v = std::strtol(b, &end, 10);
+    if (end == b || !trailing_is_ws(end)) return false;
+    if (errno == ERANGE || v < INT_MIN || v > INT_MAX) return false;
+    out = (int)v;
+    return true;
+}
+
+bool parse_float_strict(const char* s, float& out) {
+    if (!s) return false;
+    const char* b = skip_ws(s);
+    if (!*b) return false;
+    errno = 0;
+    char* end = nullptr;
+    const float v = std::strtof(b, &end);
+    if (end == b || !trailing_is_ws(end)) return false;
+    if (!std::isfinite(v)) return false;
+    out = v;
+    return true;
+}
+
+bool validate_sampling(const TrellisParams& p, std::string& err) {
+    if (p.steps != -1 && p.steps <= 0) {
+        err = "steps must be > 0 (got " + std::to_string(p.steps) + ")";
+        return false;
+    }
+    auto bound = [&err](const char* name, float v) {
+        if (v == -1.0f || (v >= 0.0f && v <= 1.0f)) return true;
+        err = std::string(name) + " must be within [0,1] (got " + std::to_string(v) + ")";
+        return false;
+    };
+    if (!bound("gi0", p.gi0) || !bound("gi1", p.gi1)) return false;
+    // An unset bound still has to hold against the default it leaves in place,
+    // so --gi1 0.5 alone is caught the same way --gi0 0.9 --gi1 0.5 is.
+    const float lo = p.gi0 == -1.0f ? 0.6f : p.gi0;
+    const float hi = p.gi1 == -1.0f ? 1.0f : p.gi1;
+    if (lo > hi) {
+        err = "gi0 (" + std::to_string(lo) + ") must be <= gi1 (" + std::to_string(hi) + ")";
+        return false;
+    }
+    return true;
 }
 
 bool parse_args(int argc, char** argv, TrellisParams& p) {
@@ -103,6 +173,12 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--require-gpu")          { p.require_gpu = true; }
         else if (a == "--gss")                  { const char* v = need(a.c_str()); if (!v) return false; p.gss = (float)atof(v); }
         else if (a == "--gsh")                  { const char* v = need(a.c_str()); if (!v) return false; p.gsh = (float)atof(v); }
+        else if (a == "--steps")                { const char* v = need(a.c_str()); if (!v) return false;
+                                                  if (!parse_int_strict(v, p.steps)) { fprintf(stderr, "[trellis] --steps needs an integer, got: %s\n", v); return false; } }
+        else if (a == "--gi0")                  { const char* v = need(a.c_str()); if (!v) return false;
+                                                  if (!parse_float_strict(v, p.gi0)) { fprintf(stderr, "[trellis] --gi0 needs a number, got: %s\n", v); return false; } }
+        else if (a == "--gi1")                  { const char* v = need(a.c_str()); if (!v) return false;
+                                                  if (!parse_float_strict(v, p.gi1)) { fprintf(stderr, "[trellis] --gi1 needs a number, got: %s\n", v); return false; } }
         else if (a == "--host")                 { const char* v = need(a.c_str()); if (!v) return false; p.host = v; }
         else if (a == "--port")                 { const char* v = need(a.c_str()); if (!v) return false; p.port = atoi(v); }
         else if (a == "--voxply")               { p.voxply = true; }
@@ -111,6 +187,11 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (positional == 0)               { p.image  = a; positional = 1; }
         else if (positional == 1)               { p.output = a; positional = 2; }
         else                                    { fprintf(stderr, "[trellis] unexpected argument: %s\n", a.c_str()); return false; }
+    }
+    std::string err;
+    if (!validate_sampling(p, err)) {
+        fprintf(stderr, "[trellis] %s\n", err.c_str());
+        return false;
     }
     return true;
 }

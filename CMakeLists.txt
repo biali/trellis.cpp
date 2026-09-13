@@ -315,6 +315,11 @@ add_executable(trellis-test-shape-dec src/test_shape_dec.cpp)
 target_link_libraries(trellis-test-shape-dec PRIVATE trellis_core)
 set_target_properties(trellis-test-shape-dec PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
+# Parser/validation checks only — no ggml, no models, no GPU, so this one builds
+# and runs anywhere (including CI without a backend).
+add_executable(trellis-test-args src/test_args.cpp src/trellis_args.cpp)
+target_include_directories(trellis-test-args PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 add_executable(trellis-cli src/trellis_cli_main.cpp src/trellis_cli.cpp src/trellis_args.cpp)
 target_link_libraries(trellis-cli PRIVATE trellis_core)
 set_target_properties(trellis-cli PROPERTIES BUILD_RPATH "${GGML_RPATH}")

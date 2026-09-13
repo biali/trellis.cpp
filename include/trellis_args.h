@@ -54,6 +54,16 @@ struct TrellisParams {
     bool require_gpu = false;   // refuse CPU fallback if no GPU is usable
     float gss = 7.5f;           // sparse-structure guidance strength
     float gsh = 7.5f;           // shape-SLAT guidance strength
+
+    // Flow-sampler overrides, applied to every stage (sparse-structure, shape
+    // SLAT, texture SLAT) on top of that stage's own defaults. -1 keeps the
+    // stage default: 12 steps, guidance interval [0.6, 1.0] — [0.6, 0.9] for
+    // texture. Fewer steps cost forwards linearly; raising gi0 additionally
+    // drops the CFG pair on every step whose rescaled timestep falls below it,
+    // so the two compound (--steps 8 --gi0 0.75 measured 1.36x end-to-end).
+    int   steps = -1;           // sampler steps                 (>0)
+    float gi0   = -1.0f;        // guidance interval lower bound  (0..1)
+    float gi1   = -1.0f;        // guidance interval upper bound  (0..1, >= gi0)
     bool voxply = false;        // dump out/myvox.ply              (debug)
     bool dump_slat = false;     // dump /tmp/hr_slat.bin           (debug)
     bool dump_bg = false;       // also write the bg-removal cutout as <out>_cutout.png
@@ -74,5 +84,17 @@ void print_usage(const char* argv0, bool server);
 // (non-flag) positionals fill `image` then `output`. Returns false on a parse
 // error OR when --help was requested; check p.help to tell them apart.
 bool parse_args(int argc, char** argv, TrellisParams& p);
+
+// Strict numeric parsing: the whole token (bar surrounding whitespace) must be
+// the number, so "abc" and "8x" are errors rather than atoi's silent 0. Leaves
+// `out` untouched and returns false on a malformed value.
+bool parse_int_strict(const char* s, int& out);
+bool parse_float_strict(const char* s, float& out);
+
+// Range-check the sampling overrides: steps > 0 and 0 <= gi0 <= gi1 <= 1, with
+// an unset (-1) bound compared against its default. Fills `err` with the reason
+// when it returns false. parse_args runs it for the CLI; trellis-server runs it
+// per request so a bad body is rejected before any GPU work.
+bool validate_sampling(const TrellisParams& p, std::string& err);
 
 }  // namespace trellis

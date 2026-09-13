@@ -119,6 +119,8 @@ The most useful ones:
 | `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |
 | `--box-uv` | voxel-native 6-way box projection instead of the default xatlas unwrap (O(faces), faster, looser packing) |
 | `--seed N` | RNG seed |
+| `--steps N` | flow sampler steps, all three stages (default 12) |
+| `--gi0 F` / `--gi1 F` | guidance interval `[gi0,gi1]`, all three stages (default 0.6 / 1.0, texture 0.9). A step whose rescaled timestep falls outside the interval runs a single forward instead of the CFG pair, so raising `gi0` compounds with fewer steps: `--steps 8 --gi0 0.75` measured **1.36x end-to-end** (346s → 255s on an RTX 3060), at a mean surface deviation of 0.32% of the bbox diagonal — below the f16→Q4 step already in production. Measured on one object and one seed; A/B your own assets before adopting it as a default |
 | `--require-gpu` | fail instead of falling back to the (very slow, RAM-hungry) CPU path |
 
 The postprocess matches the reference pipeline op for op (see
@@ -145,8 +147,10 @@ GET  /health     -> "ok"
 POST /generate      multipart/form-data with an "image" file part; optional text
                     fields "seed", "resolution" (512/1024/1536), "bg_removal"
                     (threshold|birefnet), "uv" (xatlas|box), "band", "webp",
-                    "face_budget" (QEM face target before UV bake; omit = default).
-                    Returns model/gltf-binary.
+                    "face_budget" (QEM face target before UV bake; omit = default),
+                    "steps", "gi0", "gi1" (sampler steps / guidance interval —
+                    a malformed or out-of-range value is a 400, before any GPU
+                    work). Returns model/gltf-binary.
 ```
 
 Launch-time flags (including `--res`) set the per-request defaults; each request can
